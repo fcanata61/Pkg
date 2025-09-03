@@ -237,36 +237,17 @@ run_hook() {
 }
 
 configure_step() {
-  pushd "${WORKDIR}" >/dev/null || die "WORKDIR inválido"
-  run_hook pre_configure
-  if [[ -x "${RECIPE_DIR}/hooks/configure" ]]; then
-    spinner_run "Hook configure" "${RECIPE_DIR}/hooks/configure" "${WORKDIR}" "${ROOTFS}" "${PKGDEST}"
-  else
-    case "${BUILD_SYSTEM}" in
-      autotools)
-        mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
-        spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
-        popd >/dev/null || true
-        ;;
-      cmake)
-        mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
-        spinner_run "cmake" -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "${CONFIG_OPTS[@]:-}"
-        popd >/dev/null || true
-        ;;
-      meson)
-        mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
-        spinner_run "meson setup" meson setup . .. --prefix=/usr "${CONFIG_OPTS[@]:-}"
-        popd >/dev/null || true
-        ;;
-      make)
-        pushd "${WORKDIR}" >/dev/null || die "Falha em WORKDIR"
-        info "BUILD_SYSTEM=make (sem configure)"
-        popd >/dev/null || true
-        ;;
-      *) die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}" ;;
-    esac
-  fi
-  popd >/dev/null || true
+    local builddir="${WORKDIR}/build"
+    mkdir -p "$builddir"        # cria o diretório build
+    pushd "$builddir" >/dev/null
+
+    if [[ -x ../configure ]]; then
+        spinner_run "../configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
+    else
+        die "Nenhum configure encontrado em ${WORKDIR}"
+    fi
+
+    popd >/dev/null
 }
 
 compile_step() {
