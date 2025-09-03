@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+
+# lfslite.sh — constrói e gerencia um sistema "Linux From Scratch" simples usando receitas e hooks
+# Licença: MIT
+# Requisitos: bash >= 4, coreutils, curl, git, tar, xz, zstd (opcional), unzip (para .zip), patch, make, gcc, fakeroot (opcional)
+
+set -euo pipefail
+set -o pipefail
+
+############################################
+# 0) CONFIGURAÇÃO (pode ser sobrescrita via env ou .env)
+############################################
+: "${ROOTFS:=/opt/lfslite/root}"          
+: "${REPO:=./recipes}"                    
+: "${WORK:=./work}"                        
+: "${DIST:=./dist}"                        
+: "${BUILD:=./build}"                      
+: "${DB:=./var/lfslite/db}"                
+: "${LOGS:=./var/lfslite/logs}"            
+: "${JOBS:=$(nproc 2>/dev/null || echo 2)}" 
+: "${FAKEROOT:=auto}"                      
+: "${COLOR:=auto}"                         
+: "${SPINNER:=yes}"                        
+: "${DEFAULT_CATEGORY:=base}"              
+: "${EDITOR:=vi}"
+
+# Inicializa arrays para segurança
+declare -a PATCHES=()
+declare -a BINARIES=()
+declare -a CONFIG_OPTS=()
+declare -a MAKE_OPTS=()
+declare -a INSTALL_OPTS=()
+
+# Arquivo opcional .env
+if [[ -f .env ]]; then
+  # shellcheck disable=SC1091
+  source ./.env
+fi
+
+############################################
+# 1) UI — cores, emojis, spinner
+############################################
+_supports_color() { [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ $(tput colors 2>/dev/null || echo 0) -ge 8 ]]; }
+if [[ ${COLOR} == always ]] || { [[ ${COLOR} == auto ]] && _supports_color; }; then
+  BOLD="$(tput bold)"; DIM="$(tput dim)"; RESET="$(tput sgr0)"; RED="$(tput setaf 1)"; GREEN="$(tput setaf 2)"; YELLOW="$(tput setaf 3)"; BLUE="$(tput setaf 4)"; CYAN="$(tput setaf 6)";
+else
+  BOLD=""; DIM=""; RESET=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; CYAN="";
+fi
+
+info()    { echo -e "${BLUE}ℹ${RESET}  $*"; }
+success() { echo -e "${GREEN}✔${RESET}  $*"; }
+warn()    { echo -e "${YELLOW}⚠${RESET}  $*"; }
+err()     { echo -e "${RED}✖${RESET}  $*"; }
+
+die() { err "$*"; exit 1; }
+
+# Logging helpers
+_ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
+logfile_for() { mkdir -p "${LOGS}"; echo "${LOGS}/$(date +%Y%m%d-%H%M%S)-$1.log"; }
+logrun() {
+  local tag=$1; shift
+  local logf; logf=$(logfile_for "${tag}")
+  "$@" > >(tee -a "${logf}") 2> >(tee -a "${logf}" >&2)
+}
+
+spinner_run() {
+  local label=$1; shift
+  if [[ ${SPINNER} != yes ]]; then
+    info "${label}"
+    "$@"
+    return $?
+  fi
+  info "${label}"
+  ("$@") & local pid=$!
+  local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  local i=0
+  while kill -0 ${pid} 2>/dev/null; do
+    printf "\r${DIM}%s${RESET} %s" "${frames[i]}" "${label}"
+    i=$(( (i + 1) % 10 ))
+    sleep 0.1
+  done
+  wait ${pid}; local rc=$?
+  printf "\r"
+  if [[ ${rc} -eq 0 ]]; then success "${label}"; else err "${label} (rc=${rc})"; fi
+  return ${rc}
+}
+
+############################################
+# 2) Estruturas / helpers
+############################################
+setup_dirs() {
+  mkdir -p "${ROOTFS}" "${REPO}" "${WORK}" "${DIST}" "${BUILD}" "${DB}" "${LOGS}"
+  mkdir -p "${REPO}/base" "${REPO}/extras" "${REPO}/x11" "${REPO}/desktop"
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+check_deps() {
+  local missing=()
+  local req=(bash curl git tar xz patch make gcc)
+  have unzip || warn "unzip ausente — apenas necessário para .zip"
+  have zstd  || warn "zstd ausente — apenas necessário para .tar.zst"
+  for b in "${req[@]}"; do have "$b" || missing+=("$b"); done
+  if (( ${#missing[@]} )); then
+    die "Dependências faltando: ${missing[*]}"
+  fi
+}
+
+choose_fakeroot() {
+  case "${FAKEROOT}" in
+    yes) echo 1 ;;
+    no)  echo 0 ;;
+    auto) have fakeroot && echo 1 || echo 0 ;;
+  esac
+}
+
+############################################
+# 3) Formato de receita
+############################################
+load_recipe() {
+  local path=$1
+  [[ -f ${path} ]] || die "Receita não encontrada: ${path}"
+  # shellcheck disable=SC1090
+  source "${path}"
+  RECIPE_FILE="${path}"
+  RECIPE_DIR="$(dirname "${path}")"
+  : "${NAME:?NAME não definido na receita}"
+  : "${VERSION:?VERSION não definido na receita}"
+  PKGID="${NAME}-${VERSION}"
+  SRC_BASENAME="${ARCHIVE:-${URL##*/}}"
+  SRC_TARBALL="${DIST}/${SRC_BASENAME}"
+  WORKDIR="${WORK}/${PKGID}"
+  BUILDDIR="${WORKDIR}/build"
+  PKGDEST="${BUILD}/${PKGID}"
+  : "${DESTDIR_INSTALL:=yes}"
+  : "${BUILD_SYSTEM:=autotools}"
+}
+
+manifest_path() { echo "${DB}/${NAME}.manifest"; }
+meta_path()      { echo "${DB}/${NAME}.meta"; }
+installed_p()    { [[ -f $(manifest_path) ]]; }
+
+############################################
+# 4) Download, extração, patches
+############################################
+sha256_ok() {
+  local f=$1 exp=${2:-}
+  [[ -z ${exp} ]] && return 0
+  local got
+  if have sha256sum; then got=$(sha256sum "${f}" | awk '{print $1}'); else got=$(shasum -a 256 "${f}" | awk '{print $1}'); fi
+  [[ "${got}" == "${exp}" ]]
+}
+
+fetch_sources() {
+  if [[ -n ${URL:-} ]]; then
+    mkdir -p "${DIST}"
+    if [[ ! -f ${SRC_TARBALL} ]]; then
+      spinner_run "Baixando ${SRC_BASENAME}" curl -L --fail -o "${SRC_TARBALL}" "${URL}"
+    else
+      info "Artefato já existe em ${SRC_TARBALL}"
+    fi
+    if [[ -n ${SHA256:-} ]]; then sha256_ok "${SRC_TARBALL}" "${SHA256}" || die "SHA256 não confere"; fi
+  elif [[ -n ${GIT:-} ]]; then
+    mkdir -p "${WORK}"
+    local dest="${WORK}/${NAME}-src"
+    if [[ -d ${dest}/.git ]]; then
+      spinner_run "Atualizando git ${NAME}" git -C "${dest}" pull --ff-only
+    else
+      spinner_run "Clonando ${GIT}" git clone --depth 1 "${GIT}" "${dest}"
+    fi
+    WORKDIR="${dest}"
+  else
+    die "Receita sem URL ou GIT"
+  fi
+}
+
+extract_sources() {
+  mkdir -p "${WORK}"
+  if [[ -n ${GIT:-} ]]; then info "Fonte via git, pulando extração"; return 0; fi
+  rm -rf "${WORKDIR}"
+  mkdir -p "${WORKDIR}"
+  case "${SRC_TARBALL}" in
+    *.tar.gz|*.tgz)   spinner_run "Extraindo tar.gz" tar -xzf "${SRC_TARBALL}" -C "${WORKDIR}" --strip-components=1 ;;
+    *.tar.bz2|*.tbz)  spinner_run "Extraindo tar.bz2" tar -xjf "${SRC_TARBALL}" -C "${WORKDIR}" --strip-components=1 ;;
+    *.tar.xz)         spinner_run "Extraindo tar.xz" tar -xJf "${SRC_TARBALL}" -C "${WORKDIR}" --strip-components=1 ;;
+    *.tar.zst)        spinner_run "Extraindo tar.zst" tar --zstd -xf "${SRC_TARBALL}" -C "${WORKDIR}" --strip-components=1 ;;
+    *.zip)            spinner_run "Extraindo zip" unzip -q "${SRC_TARBALL}" -d "${WORKDIR}" ;;
+    *.gz)             spinner_run "Descompactando .gz"  gunzip -c "${SRC_TARBALL}" > "${WORKDIR}/$(basename "${SRC_TARBALL%.gz}")" ;;
+    *.xz)             spinner_run "Descompactando .xz"  xz -dc "${SRC_TARBALL}" > "${WORKDIR}/$(basename "${SRC_TARBALL%.xz}")" ;;
+    *.bz2)            spinner_run "Descompactando .bz2" bzip2 -dc "${SRC_TARBALL}" > "${WORKDIR}/$(basename "${SRC_TARBALL%.bz2}")" ;;
+    *) die "Formato não suportado: ${SRC_TARBALL}" ;;
+  esac
+}
+
+apply_patches() {
+  # Garante que PATCHES é um array, mesmo se não definido
+  declare -a PATCHES="${PATCHES[@]:-}"
+
+  # Se não houver patches, retorna imediatamente
+  if [[ ${#PATCHES[@]} -eq 0 ]]; then
+    info "Sem patches"
+    return 0
+  fi
+
+  pushd "${WORKDIR}" >/dev/null || die "WORKDIR inválido"
+
+  for p in "${PATCHES[@]}"; do
+    local patchfile="$p"
+
+    # Baixa patch se for URL
+    if [[ "$p" =~ ^https?:// ]]; then
+      patchfile="${DIST}/$(basename "$p")"
+      [[ -f ${patchfile} ]] || spinner_run "Baixando patch $(basename "$p")" curl -L --fail -o "${patchfile}" "$p"
+
+    # Se não existe no caminho original, tenta na receita
+    elif [[ ! -f ${patchfile} ]]; then
+      patchfile="${RECIPE_DIR}/$(basename "$p")"
+    fi
+
+    # Confirma que o patch existe
+    [[ -f ${patchfile} ]] || die "Patch não encontrado: $p"
+
+    # Aplica patch
+    spinner_run "Aplicando patch $(basename "${patchfile}")" patch -p1 < "${patchfile}"
+  done
+
+  popd >/dev/null || true
+}
+
+# As funções configure_step, compile_step, install_step, remove_pkg, build_only, full_build
