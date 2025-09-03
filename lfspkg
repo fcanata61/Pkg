@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
 
-# lfslite.sh — constrói e gerencia um sistema "Linux From Scratch" simples usando receitas e hooks
+# lfslite1.0.sh — constrói e gerencia um sistema "Linux From Scratch" simples usando receitas e hooks
 # Licença: MIT
 # Requisitos: bash >= 4, coreutils, curl, git, tar, xz, zstd (opcional), unzip (para .zip), patch, make, gcc, fakeroot (opcional)
 
 set -euo pipefail
-set -o pipefail
 
 ############################################
 # 0) CONFIGURAÇÃO (pode ser sobrescrita via env ou .env)
 ############################################
 : "${ROOTFS:=/opt/lfslite/root}"          # destino final de instalação
 : "${REPO:=./recipes}"                    # onde ficam as receitas (base, extras, x11, desktop)
-: "${WORK:=./work}"                        # diretório de trabalho para compilar
-: "${DIST:=./dist}"                        # onde armazenar downloads (arquivos fonte/patches)
-: "${BUILD:=./build}"                      # área temporária por pacote (DESTDIR)
-: "${DB:=./var/lfslite/db}"                # manifest/registro de instalações
-: "${LOGS:=./var/lfslite/logs}"            # logs por ação/pacote
+: "${WORK:=./work}"                       # diretório de trabalho para compilar
+: "${DIST:=./dist}"                       # onde armazenar downloads (arquivos fonte/patches)
+: "${BUILD:=./build}"                     # área temporária por pacote (DESTDIR)
+: "${DB:=./var/lfslite/db}"               # manifest/registro de instalações
+: "${LOGS:=./var/lfslite/logs}"           # logs por ação/pacote
 : "${JOBS:=$(nproc 2>/dev/null || echo 2)}" # paralelismo padrão
-: "${FAKEROOT:=auto}"                      # auto|yes|no — usar fakeroot se disponível
-: "${COLOR:=auto}"                         # auto|always|never
-: "${SPINNER:=yes}"                        # spinner ligado/desligado
-: "${DEFAULT_CATEGORY:=base}"              # categoria padrão ao criar receita
+: "${FAKEROOT:=auto}"                     # auto|yes|no — usar fakeroot se disponível
+: "${COLOR:=auto}"                        # auto|always|never
+: "${SPINNER:=yes}"                       # spinner ligado/desligado
+: "${DEFAULT_CATEGORY:=base}"             # categoria padrão ao criar receita
 : "${EDITOR:=vi}"
+
+# Inicializa arrays (garante existência mínima)
+declare -a PATCHES=()
+declare -a BINARIES=()
+declare -a CONFIG_OPTS=()
+declare -a MAKE_OPTS=()
+declare -a INSTALL_OPTS=()
 
 # Arquivo opcional .env
 if [[ -f .env ]]; then
@@ -188,8 +194,10 @@ extract_sources() {
 }
 
 apply_patches() {
-  # Garante que PATCHES é um array, mesmo se não definido
-  declare -a PATCHES="${PATCHES[@]:-}"
+  # Se PATCHES não for um array definido, inicializa como vazio
+  if ! declare -p PATCHES >/dev/null 2>&1; then
+    declare -a PATCHES=()
+  fi
 
   if [[ ${#PATCHES[@]} -eq 0 ]]; then
     info "Sem patches"
@@ -197,17 +205,26 @@ apply_patches() {
   fi
 
   pushd "${WORKDIR}" >/dev/null || die "WORKDIR inválido"
+
   for p in "${PATCHES[@]}"; do
     local patchfile="$p"
+
+    # Baixa patch se for URL
     if [[ "$p" =~ ^https?:// ]]; then
       patchfile="${DIST}/$(basename "$p")"
       [[ -f ${patchfile} ]] || spinner_run "Baixando patch $(basename "$p")" curl -L --fail -o "${patchfile}" "$p"
+    # Se não existe no caminho original, tenta na receita
     elif [[ ! -f ${patchfile} ]]; then
       patchfile="${RECIPE_DIR}/$(basename "$p")"
     fi
+
+    # Confirma que o patch existe
     [[ -f ${patchfile} ]] || die "Patch não encontrado: $p"
+
+    # Aplica patch
     spinner_run "Aplicando patch $(basename "${patchfile}")" patch -p1 < "${patchfile}"
   done
+
   popd >/dev/null || true
 }
 
@@ -229,18 +246,22 @@ configure_step() {
       autotools)
         mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
         spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
+        popd >/dev/null || true
         ;;
       cmake)
         mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
         spinner_run "cmake" -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "${CONFIG_OPTS[@]:-}"
+        popd >/dev/null || true
         ;;
       meson)
         mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
         spinner_run "meson setup" meson setup . .. --prefix=/usr "${CONFIG_OPTS[@]:-}"
+        popd >/dev/null || true
         ;;
       make)
-        mkdir -p "${BUILDDIR}"; pushd "${WORKDIR}" >/dev/null || die "Falha em WORKDIR"
+        pushd "${WORKDIR}" >/dev/null || die "Falha em WORKDIR"
         info "BUILD_SYSTEM=make (sem configure)"
+        popd >/dev/null || true
         ;;
       *) die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}" ;;
     esac
@@ -273,7 +294,12 @@ install_step() {
   local use_fr; use_fr=$(choose_fakeroot)
   local dir=${BUILDDIR:-${WORKDIR}}
 
-  if [[ ${#BINARIES[@]:-0} -gt 0 ]]; then
+  # Garante BINARIES como array se não existir
+  if ! declare -p BINARIES >/dev/null 2>&1; then
+    declare -a BINARIES=()
+  fi
+
+  if [[ ${#BINARIES[@]} -gt 0 ]]; then
     for b in "${BINARIES[@]}"; do
       local rel="${b#/}" ; mkdir -p "${PKGDEST}/$(dirname "${rel}")"
       cp -av "${WORKDIR}/$(basename "${b}")" "${PKGDEST}/${rel}"
@@ -293,7 +319,7 @@ install_step() {
 
   if [[ ${DESTDIR_INSTALL} == yes ]]; then
     mkdir -p "${ROOTFS}"
-    if [[ ${use_fr} -eq 1 ]]; then
+    if [[ "$(choose_fakeroot)" -eq 1 ]]; then
       spinner_run "fakeroot merge" fakeroot sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
     else
       spinner_run "merge arquivos" sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
@@ -310,6 +336,7 @@ install_step() {
 
   run_hook install
   run_hook post_install
+
   if [[ -s $(manifest_path) ]]; then
     local count; count=$(wc -l <"$(manifest_path)")
     success "Instalado ${BOLD}${NAME}${RESET} ${DIM}($(manifest_path): ${count} arquivos)${RESET}"
@@ -321,21 +348,34 @@ install_step() {
 remove_pkg() {
   local man; man=$(manifest_path)
   [[ -f ${man} ]] || die "Pacote não instalado: ${NAME}"
-  tac "${man}" | while read -r p; do
-    local path="${ROOTFS}${p}"
-    if [[ -d ${path} && ! -L ${path} ]]; then
-      rmdir --ignore-fail-on-non-empty "${path}" 2>/dev/null || true
-    else
-      rm -f "${path}" 2>/dev/null || true
-    fi
-  done
+  # percorre em ordem inversa para remover arquivos antes dos diretórios
+  if command -v tac >/dev/null 2>&1; then
+    tac "${man}" | while read -r p; do
+      local path="${ROOTFS}${p}"
+      if [[ -d ${path} && ! -L ${path} ]]; then
+        rmdir --ignore-fail-on-non-empty "${path}" 2>/dev/null || true
+      else
+        rm -f "${path}" 2>/dev/null || true
+      fi
+    done
+  else
+    # fallback se tac não existir
+    tail -r "${man}" | while read -r p; do
+      local path="${ROOTFS}${p}"
+      if [[ -d ${path} && ! -L ${path} ]]; then
+        rmdir --ignore-fail-on-non-empty "${path}" 2>/dev/null || true
+      else
+        rm -f "${path}" 2>/dev/null || true
+      fi
+    done
+  fi
   run_hook post_remove || true
   rm -f "${man}" "$(meta_path)"
   success "Removido ${NAME}"
 }
 
 ############################################
-# 7) Ações compostas
+# 7) Ações compostas (build sem instalar, build+install, info, limpar)
 ############################################
 build_only() { fetch_sources; extract_sources; apply_patches; configure_step; compile_step; }
 full_build_install() { build_only; install_step; }
@@ -348,4 +388,98 @@ pkg_info() {
   [[ -f ${meta} ]] && { echo "${BOLD}Meta:${RESET}"; cat "${meta}"; }
 }
 
-clean_work() { rm -rf "${WORK}"/* "${BUILD}"/*; success "Limpos: ${WORK} e ${BUILD
+clean_work() { rm -rf "${WORK}"/* "${BUILD}"/*; success "Limpos: ${WORK} e ${BUILD}"; }
+
+############################################
+# 8) Toolchain (esqueleto simplificado)
+############################################
+init_toolchain() {
+  : "${LFS_TGT:=$(uname -m)-lfslite-linux-gnu}"
+  : "${TOOLS:=/opt/lfslite/tools}"
+  mkdir -p "${TOOLS}" "${ROOTFS}" "${ROOTFS}"/{usr,lib,bin,include}
+  cat > .toolchain.env <<EOF
+export LFS_TGT="${LFS_TGT}"
+export PATH="${TOOLS}/bin:\$PATH"
+export CONFIG_SITE="${ROOTFS}/usr/share/config.site"
+export CC="gcc"; export CXX="g++"
+EOF
+  success "Toolchain inicializado. Ative com: ${BOLD}source ./.toolchain.env${RESET}"
+}
+
+############################################
+# 9) Criar receita (scaffold)
+############################################
+create_recipe() {
+  # create_recipe <nome> [categoria]
+  local name=${1:?Informe <nome>}
+  local cat=${2:-${DEFAULT_CATEGORY}}
+  local dir="${REPO}/${cat}"
+  mkdir -p "${dir}/hooks"
+  cat > "${dir}/${name}.recipe" <<'TEMPLATE'
+# Exemplo de receita
+NAME="hello"
+VERSION="2.12"
+URL="https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz"
+SHA256="6a9fa5d0b2e1f908a3f2b712f852d6732d97869bc1f67ef9b3c5f2dba7d7f29f"
+PATCHES=( )
+BUILD_SYSTEM=autotools
+CONFIG_OPTS=( )
+MAKE_OPTS=( )
+INSTALL_OPTS=( )
+DESTDIR_INSTALL=yes
+# BINARIES=(/usr/bin/hello) # para copiar binários do workdir
+TEMPLATE
+  chmod +x "${dir}/${name}.recipe"
+  success "Receita criada em ${dir}/${name}.recipe"
+}
+
+############################################
+# 10) CLI
+############################################
+usage() {
+  cat <<USAGE
+${BOLD}lfslite1.0.sh${RESET} — constrói/instala/remove pacotes em uma LFS simples usando receitas
+
+${BOLD}Uso:${RESET}
+  $0 init                                       # cria estrutura de diretórios
+  $0 new <nome> [categoria]                     # cria esqueleto de receita
+  $0 fetch   <caminho/receita>                  # baixar fontes
+  $0 extract <caminho/receita>                  # extrair fontes
+  $0 patch   <caminho/receita>                  # aplicar patches
+  $0 configure <caminho/receita>                # configurar
+  $0 build <caminho/receita>                    # compilar (sem instalar)
+  $0 install <caminho/receita>                  # construir e instalar
+  $0 remove <caminho/receita>                   # desinstalar usando manifest
+  $0 info <caminho/receita>                     # informações do pacote
+  $0 toolchain init                             # inicializar toolchain básico
+  $0 clean                                      # limpar WORK e BUILD
+
+${BOLD}Layout de receitas:${RESET}
+  ${REPO}/{base,extras,x11,desktop}/<nome>.recipe
+
+Variáveis do ambiente: ROOTFS, REPO, WORK, DIST, BUILD, DB, LOGS, JOBS, FAKEROOT, COLOR, SPINNER
+USAGE
+}
+
+main() {
+  local cmd=${1:-help}
+  case "${cmd}" in
+    help|-h|--help) usage ;;
+    init)      setup_dirs; check_deps; success "Estrutura pronta" ;;
+    new)       setup_dirs; create_recipe "${2:-}" "${3:-}" ;;
+    fetch)     load_recipe "${2:?Informe receita}"; setup_dirs; check_deps; fetch_sources ;;
+    extract)   load_recipe "${2:?Informe receita}"; setup_dirs; extract_sources ;;
+    patch)     load_recipe "${2:?Informe receita}"; setup_dirs; apply_patches ;;
+    configure) load_recipe "${2:?Informe receita}"; setup_dirs; configure_step ;;
+    build)     load_recipe "${2:?Informe receita}"; setup_dirs; build_only ;;
+    install)   load_recipe "${2:?Informe receita}"; setup_dirs; full_build_install ;;
+    remove)    load_recipe "${2:?Informe receita}"; setup_dirs; remove_pkg ;;
+    info)      load_recipe "${2:?Informe receita}"; setup_dirs; pkg_info ;;
+    toolchain) [[ ${2:-} == init ]] && init_toolchain || die "Subcomando desconhecido para toolchain" ;;
+    clean)     setup_dirs; clean_work ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+# chamada final obrigatória
+main "$@"
