@@ -10,26 +10,19 @@ set -o pipefail
 ############################################
 # 0) CONFIGURAÇÃO (pode ser sobrescrita via env ou .env)
 ############################################
-: "${ROOTFS:=/opt/lfslite/root}"          
-: "${REPO:=./recipes}"                    
-: "${WORK:=./work}"                        
-: "${DIST:=./dist}"                        
-: "${BUILD:=./build}"                      
-: "${DB:=./var/lfslite/db}"                
-: "${LOGS:=./var/lfslite/logs}"            
-: "${JOBS:=$(nproc 2>/dev/null || echo 2)}" 
-: "${FAKEROOT:=auto}"                      
-: "${COLOR:=auto}"                         
-: "${SPINNER:=yes}"                        
-: "${DEFAULT_CATEGORY:=base}"              
+: "${ROOTFS:=/opt/lfslite/root}"          # destino final de instalação
+: "${REPO:=./recipes}"                    # onde ficam as receitas (base, extras, x11, desktop)
+: "${WORK:=./work}"                        # diretório de trabalho para compilar
+: "${DIST:=./dist}"                        # onde armazenar downloads (arquivos fonte/patches)
+: "${BUILD:=./build}"                      # área temporária por pacote (DESTDIR)
+: "${DB:=./var/lfslite/db}"                # manifest/registro de instalações
+: "${LOGS:=./var/lfslite/logs}"            # logs por ação/pacote
+: "${JOBS:=$(nproc 2>/dev/null || echo 2)}" # paralelismo padrão
+: "${FAKEROOT:=auto}"                      # auto|yes|no — usar fakeroot se disponível
+: "${COLOR:=auto}"                         # auto|always|never
+: "${SPINNER:=yes}"                        # spinner ligado/desligado
+: "${DEFAULT_CATEGORY:=base}"              # categoria padrão ao criar receita
 : "${EDITOR:=vi}"
-
-# Inicializa arrays para segurança
-declare -a PATCHES=()
-declare -a BINARIES=()
-declare -a CONFIG_OPTS=()
-declare -a MAKE_OPTS=()
-declare -a INSTALL_OPTS=()
 
 # Arquivo opcional .env
 if [[ -f .env ]]; then
@@ -58,12 +51,14 @@ die() { err "$*"; exit 1; }
 _ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
 logfile_for() { mkdir -p "${LOGS}"; echo "${LOGS}/$(date +%Y%m%d-%H%M%S)-$1.log"; }
 logrun() {
+  # logrun <tag> <cmd...>
   local tag=$1; shift
   local logf; logf=$(logfile_for "${tag}")
   "$@" > >(tee -a "${logf}") 2> >(tee -a "${logf}" >&2)
 }
 
 spinner_run() {
+  # spinner_run <label> <cmd...>
   local label=$1; shift
   if [[ ${SPINNER} != yes ]]; then
     info "${label}"
@@ -196,35 +191,161 @@ apply_patches() {
   # Garante que PATCHES é um array, mesmo se não definido
   declare -a PATCHES="${PATCHES[@]:-}"
 
-  # Se não houver patches, retorna imediatamente
   if [[ ${#PATCHES[@]} -eq 0 ]]; then
     info "Sem patches"
     return 0
   fi
 
   pushd "${WORKDIR}" >/dev/null || die "WORKDIR inválido"
-
   for p in "${PATCHES[@]}"; do
     local patchfile="$p"
-
-    # Baixa patch se for URL
     if [[ "$p" =~ ^https?:// ]]; then
       patchfile="${DIST}/$(basename "$p")"
       [[ -f ${patchfile} ]] || spinner_run "Baixando patch $(basename "$p")" curl -L --fail -o "${patchfile}" "$p"
-
-    # Se não existe no caminho original, tenta na receita
     elif [[ ! -f ${patchfile} ]]; then
       patchfile="${RECIPE_DIR}/$(basename "$p")"
     fi
-
-    # Confirma que o patch existe
     [[ -f ${patchfile} ]] || die "Patch não encontrado: $p"
-
-    # Aplica patch
     spinner_run "Aplicando patch $(basename "${patchfile}")" patch -p1 < "${patchfile}"
   done
-
   popd >/dev/null || true
 }
 
-# As funções configure_step, compile_step, install_step, remove_pkg, build_only, full_build
+############################################
+# 5) Build: configure/compile
+############################################
+run_hook() {
+  local hook="${RECIPE_DIR}/hooks/$1"
+  if [[ -x ${hook} ]]; then spinner_run "Hook $1" "${hook}" "${WORKDIR}" "${ROOTFS}" "${PKGDEST}"; fi
+}
+
+configure_step() {
+  pushd "${WORKDIR}" >/dev/null || die "WORKDIR inválido"
+  run_hook pre_configure
+  if [[ -x "${RECIPE_DIR}/hooks/configure" ]]; then
+    spinner_run "Hook configure" "${RECIPE_DIR}/hooks/configure" "${WORKDIR}" "${ROOTFS}" "${PKGDEST}"
+  else
+    case "${BUILD_SYSTEM}" in
+      autotools)
+        mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
+        spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
+        ;;
+      cmake)
+        mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
+        spinner_run "cmake" -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "${CONFIG_OPTS[@]:-}"
+        ;;
+      meson)
+        mkdir -p "${BUILDDIR}"; pushd "${BUILDDIR}" >/dev/null || die "Falha em BUILDDIR"
+        spinner_run "meson setup" meson setup . .. --prefix=/usr "${CONFIG_OPTS[@]:-}"
+        ;;
+      make)
+        mkdir -p "${BUILDDIR}"; pushd "${WORKDIR}" >/dev/null || die "Falha em WORKDIR"
+        info "BUILD_SYSTEM=make (sem configure)"
+        ;;
+      *) die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}" ;;
+    esac
+  fi
+  popd >/dev/null || true
+}
+
+compile_step() {
+  local dir=${BUILDDIR:-${WORKDIR}}
+  pushd "${dir}" >/dev/null || die "Diretório de build inválido"
+  case "${BUILD_SYSTEM}" in
+    autotools|cmake|meson|make)
+      spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}" "${MAKE_OPTS[@]:-}"
+      ;;
+    *) die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}" ;;
+  esac
+  popd >/dev/null || true
+}
+
+############################################
+# 6) Instalação (DESTDIR, fakeroot, binários) + Registro/Desinstalação
+############################################
+preinstall_snapshot()  { find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"; }
+postinstall_snapshot() { find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"; }
+manifest_from_snapshots() { comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"; }
+
+install_step() {
+  run_hook pre_install
+  mkdir -p "${PKGDEST}"
+  local use_fr; use_fr=$(choose_fakeroot)
+  local dir=${BUILDDIR:-${WORKDIR}}
+
+  if [[ ${#BINARIES[@]:-0} -gt 0 ]]; then
+    for b in "${BINARIES[@]}"; do
+      local rel="${b#/}" ; mkdir -p "${PKGDEST}/$(dirname "${rel}")"
+      cp -av "${WORKDIR}/$(basename "${b}")" "${PKGDEST}/${rel}"
+    done
+  else
+    pushd "${dir}" >/dev/null || die "Diretório de build inválido"
+    if [[ ${DESTDIR_INSTALL} == yes ]]; then
+      spinner_run "make install (DESTDIR)" make DESTDIR="${PKGDEST}" install "${INSTALL_OPTS[@]:-}"
+    else
+      preinstall_snapshot
+      spinner_run "make install (direto)" make install "${INSTALL_OPTS[@]:-}"
+      postinstall_snapshot
+      manifest_from_snapshots
+    fi
+    popd >/dev/null || true
+  fi
+
+  if [[ ${DESTDIR_INSTALL} == yes ]]; then
+    mkdir -p "${ROOTFS}"
+    if [[ ${use_fr} -eq 1 ]]; then
+      spinner_run "fakeroot merge" fakeroot sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
+    else
+      spinner_run "merge arquivos" sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
+    fi
+    ( cd "${PKGDEST}" && find . -type f -o -type l -o -type d | sed 's#^.##' | sed 's#^#/#' ) > "$(manifest_path)"
+  fi
+
+  {
+    echo "NAME=${NAME}"
+    echo "VERSION=${VERSION}"
+    echo "DATE=$(_ts)"
+    echo "RECIPE=${RECIPE_FILE}"
+  } > "$(meta_path)"
+
+  run_hook install
+  run_hook post_install
+  if [[ -s $(manifest_path) ]]; then
+    local count; count=$(wc -l <"$(manifest_path)")
+    success "Instalado ${BOLD}${NAME}${RESET} ${DIM}($(manifest_path): ${count} arquivos)${RESET}"
+  else
+    success "Instalado ${BOLD}${NAME}${RESET}"
+  fi
+}
+
+remove_pkg() {
+  local man; man=$(manifest_path)
+  [[ -f ${man} ]] || die "Pacote não instalado: ${NAME}"
+  tac "${man}" | while read -r p; do
+    local path="${ROOTFS}${p}"
+    if [[ -d ${path} && ! -L ${path} ]]; then
+      rmdir --ignore-fail-on-non-empty "${path}" 2>/dev/null || true
+    else
+      rm -f "${path}" 2>/dev/null || true
+    fi
+  done
+  run_hook post_remove || true
+  rm -f "${man}" "$(meta_path)"
+  success "Removido ${NAME}"
+}
+
+############################################
+# 7) Ações compostas
+############################################
+build_only() { fetch_sources; extract_sources; apply_patches; configure_step; compile_step; }
+full_build_install() { build_only; install_step; }
+
+pkg_info() {
+  echo "${BOLD}Pacote:${RESET} ${NAME}"
+  echo "${BOLD}Versão:${RESET} ${VERSION}"
+  echo "${BOLD}Instalado?:${RESET} $(installed_p && echo sim || echo não)"
+  local meta; meta=$(meta_path)
+  [[ -f ${meta} ]] && { echo "${BOLD}Meta:${RESET}"; cat "${meta}"; }
+}
+
+clean_work() { rm -rf "${WORK}"/* "${BUILD}"/*; success "Limpos: ${WORK} e ${BUILD
