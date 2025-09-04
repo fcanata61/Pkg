@@ -315,23 +315,20 @@ install_step() {
     pushd "$build_dir" >/dev/null || die "Falha ao entrar em ${build_dir}"
 
     # Garantir diretórios necessários
-    mkdir -p "$WORK" "$ROOTFS" "$(dirname "$(manifest_path)")" "$(dirname "$(meta_path)")" "$PKGDEST"
+    mkdir -p "$WORK" "$ROOTFS" "$PKGDEST" "$(dirname "$(manifest_path)")" "$(dirname "$(meta_path)")" "$DIST"
 
     # Pré-instalação snapshot
     find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
 
     # Construir comando de instalação
     INSTALL_CMD="make install"
-    if [ "${DESTDIR_INSTALL:-no}" = "yes" ]; then
-        INSTALL_CMD="make DESTDIR=${PKGDEST} install"
-    fi
-    # Adicionar opções se existirem
+    [ "${DESTDIR_INSTALL:-no}" = "yes" ] && INSTALL_CMD="make DESTDIR=${PKGDEST} install"
     [ -n "${INSTALL_OPTS:-}" ] && INSTALL_CMD="$INSTALL_CMD $INSTALL_OPTS"
 
     # Executar instalação com spinner
     spinner_run "Instalando" sh -c "$INSTALL_CMD"
 
-    # Se usamos DESTDIR, promover para ROOTFS
+    # Promover arquivos para ROOTFS se necessário
     if [ "${DESTDIR_INSTALL:-no}" = "yes" ]; then
         local use_fr
         use_fr=$(choose_fakeroot)
@@ -356,15 +353,20 @@ install_step() {
         echo "RECIPE=${RECIPE_FILE}"
     } > "$(meta_path)"
 
+    # Empacotar o pacote instalado em DIST
+    local pkg_tar="${DIST}/${NAME}-${VERSION}.tar.gz"
+    spinner_run "Empacotando ${NAME}-${VERSION}" \
+        sh -c "cd '$PKGDEST' && tar -czf '$pkg_tar' ."
+
     popd >/dev/null || true
 
     # Mensagem de sucesso
     if [ -s "$(manifest_path)" ]; then
         local count
         count=$(wc -l <"$(manifest_path)")
-        success "Instalado ${BOLD}${NAME}${RESET} ${DIM}($(manifest_path): ${count} arquivos)${RESET}"
+        success "Instalado e empacotado ${BOLD}${NAME}${RESET} ${DIM}($(manifest_path): ${count} arquivos)${RESET}"
     else
-        success "Instalado ${BOLD}${NAME}${RESET}"
+        success "Instalado e empacotado ${BOLD}${NAME}${RESET}"
     fi
 }
 
