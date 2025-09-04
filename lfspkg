@@ -237,32 +237,64 @@ run_hook() {
 }
 
 configure_step() {
-    local builddir="${WORKDIR}/build"
-    mkdir -p "$builddir"        # cria o diretório build
-    pushd "$builddir" >/dev/null
+    local dir="${BUILDDIR:-${WORKDIR}}"
 
-    if [[ -x ../configure ]]; then
-        spinner_run "../configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
+    # garante que o diretório exista
+    [[ -d "$dir" ]] || mkdir -p "$dir"
+
+    pushd "$dir" >/dev/null || die "Falha ao entrar em $dir"
+
+    # hooks pré-configure
+    run_hook pre_configure
+
+    if [[ -x "${RECIPE_DIR}/hooks/configure" ]]; then
+        spinner_run "Hook configure" "${RECIPE_DIR}/hooks/configure" "${WORKDIR}" "${ROOTFS}" "${PKGDEST}"
     else
-        die "Nenhum configure encontrado em ${WORKDIR}"
+        case "${BUILD_SYSTEM}" in
+            autotools)
+                mkdir -p "$BUILDDIR"
+                pushd "$BUILDDIR" >/dev/null || die "Falha em BUILDDIR"
+                spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
+                popd >/dev/null
+                ;;
+            cmake)
+                mkdir -p "$BUILDDIR"
+                pushd "$BUILDDIR" >/dev/null || die "Falha em BUILDDIR"
+                spinner_run "cmake" -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "${CONFIG_OPTS[@]:-}"
+                popd >/dev/null
+                ;;
+            meson)
+                mkdir -p "$BUILDDIR"
+                pushd "$BUILDDIR" >/dev/null || die "Falha em BUILDDIR"
+                spinner_run "meson setup" meson setup . .. --prefix=/usr "${CONFIG_OPTS[@]:-}"
+                popd >/dev/null
+                ;;
+            make)
+                info "BUILD_SYSTEM=make (sem configure)"
+                ;;
+            *)
+                die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}"
+                ;;
+        esac
     fi
 
-    popd >/dev/null
+    popd >/dev/null || true
 }
 
 compile_step() {
-    local dir=${BUILDDIR:-${WORKDIR}}
-    pushd "${dir}" >/dev/null || die "Diretório de build inválido"
+    local dir="${BUILDDIR:-${WORKDIR}}"
+
+    [[ -d "$dir" ]] || die "Diretório de build inválido: $dir"
+
+    pushd "$dir" >/dev/null || die "Falha ao entrar em $dir"
 
     case "${BUILD_SYSTEM}" in
         autotools|cmake|meson|make)
-            if [[ ${#MAKE_OPTS[@]} -gt 0 ]]; then
-                spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}" "${MAKE_OPTS[@]}"
-            else
-                spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}"
-            fi
+            spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}" "${MAKE_OPTS[@]:-}"
             ;;
-        *) die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}" ;;
+        *)
+            die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}"
+            ;;
     esac
 
     popd >/dev/null || true
@@ -276,38 +308,51 @@ postinstall_snapshot() { find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sor
 manifest_from_snapshots() { comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"; }
 
 install_step() {
-  local build_dir="${BUILDDIR:-${WORK}}"
+    local build_dir="${BUILDDIR:-$WORK}"
 
-  # garante que o build existe
-  [[ -d "$build_dir" ]] || die "Build directory não encontrado: ${build_dir}"
+    # garante que o build existe
+    [[ -d "$build_dir" ]] || die "Build directory não encontrado: ${build_dir}"
 
-  pushd "$build_dir" >/dev/null || die "Falha ao entrar em ${build_dir}"
+    pushd "$build_dir" >/dev/null || die "Falha ao entrar em ${build_dir}"
 
-  if [[ "${DESTDIR_INSTALL:-no}" == "yes" ]]; then
-    preinstall_snapshot
+    # garante que WORK exista antes de criar snapshots
+    mkdir -p "${WORK}"
 
-    if (( ${#INSTALL_OPTS[@]:-0} )); then
-      spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}" "${INSTALL_OPTS[@]}"
+    if [[ "${DESTDIR_INSTALL:-no}" == "yes" ]]; then
+        # snapshot antes da instalação
+        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
+
+        # make install com DESTDIR
+        if (( ${#INSTALL_OPTS[@]:-0} )); then
+            spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}" "${INSTALL_OPTS[@]}"
+        else
+            spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}"
+        fi
+
+        # snapshot após a instalação
+        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"
+
+        # gerar manifest
+        comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"
     else
-      spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}"
+        # snapshot antes da instalação
+        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
+
+        # make install direto
+        if (( ${#INSTALL_OPTS[@]:-0} )); then
+            spinner_run "make install (direto)" make install "${INSTALL_OPTS[@]}"
+        else
+            spinner_run "make install (direto)" make install
+        fi
+
+        # snapshot após a instalação
+        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"
+
+        # gerar manifest
+        comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"
     fi
 
-    postinstall_snapshot
-    manifest_from_snapshots
-  else
-    preinstall_snapshot
-
-    if (( ${#INSTALL_OPTS[@]:-0} )); then
-      spinner_run "make install (direto)" make install "${INSTALL_OPTS[@]}"
-    else
-      spinner_run "make install (direto)" make install
-    fi
-
-    postinstall_snapshot
-    manifest_from_snapshots
-  fi
-
-  popd >/dev/null || true
+    popd >/dev/null || true
 }
 
 remove_pkg() {
