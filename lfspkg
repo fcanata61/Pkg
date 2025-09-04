@@ -296,10 +296,10 @@ install_step() {
     if [[ ${DESTDIR_INSTALL} == yes ]]; then
       spinner_run "make install (DESTDIR)" make DESTDIR="${PKGDEST}" install "${INSTALL_OPTS[@]:-}"
     else
-      preinstall_snapshot
-      spinner_run "make install (direto)" make install "${INSTALL_OPTS[@]:-}"
-      postinstall_snapshot
-      manifest_from_snapshots
+      preinstall_snapshot() {
+    mkdir -p "${WORK}"
+    find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst" || touch "${WORK}/.preinstall.lst"
+}
     fi
     popd >/dev/null || true
   fi
