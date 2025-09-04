@@ -153,26 +153,32 @@ sha256_ok() {
 }
 
 fetch_sources() {
-  if [[ -n ${URL:-} ]]; then
-    mkdir -p "${DIST}"
-    if [[ ! -f ${SRC_TARBALL} ]]; then
-      spinner_run "Baixando ${SRC_BASENAME}" curl -L --fail -o "${SRC_TARBALL}" "${URL}"
+    if [[ -n ${URL:-} ]]; then
+        mkdir -p "${DIST}"
+        if [[ ! -f ${SRC_TARBALL} ]]; then
+            spinner_run "Baixando ${SRC_BASENAME}" curl -L --fail -o "${SRC_TARBALL}" "${URL}"
+        else
+            info "Artefato já existe em ${SRC_TARBALL}"
+        fi
+
+        # Verificação SHA256
+        if [[ -n ${SHA256:-} ]]; then
+            sha256_ok "${SRC_TARBALL}" "${SHA256}" || die "SHA256 não confere"
+        fi
+
+    elif [[ -n ${GIT:-} ]]; then
+        mkdir -p "${WORK}"
+        local dest="${WORK}/${NAME}-src"
+        if [[ -d ${dest}/.git ]]; then
+            spinner_run "Atualizando git ${NAME}" git -C "${dest}" pull --ff-only
+        else
+            spinner_run "Clonando ${GIT}" git clone --depth 1 "${GIT}" "${dest}"
+        fi
+        WORKDIR="${dest}"
+
     else
-      info "Artefato já existe em ${SRC_TARBALL}"
+        die "Receita sem URL ou GIT"
     fi
-    if [[ -n ${SHA256:-} ]]; then sha256_ok "${SRC_TARBALL}" "${SHA256}" || die "SHA256 não confere"; fi
-  elif [[ -n ${GIT:-} ]]; then
-    mkdir -p "${WORK}"
-    local dest="${WORK}/${NAME}-src"
-    if [[ -d ${dest}/.git ]]; then
-      spinner_run "Atualizando git ${NAME}" git -C "${dest}" pull --ff-only
-    else
-      spinner_run "Clonando ${GIT}" git clone --depth 1 "${GIT}" "${dest}"
-    fi
-    WORKDIR="${dest}"
-  else
-    die "Receita sem URL ou GIT"
-  fi
 }
 
 extract_sources() {
