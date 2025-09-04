@@ -276,29 +276,25 @@ postinstall_snapshot() { find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sor
 manifest_from_snapshots() { comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"; }
 
 install_step() {
-  run_hook pre_install
-  mkdir -p "${PKGDEST}"
-  local use_fr; use_fr=$(choose_fakeroot)
-  local dir=${BUILDDIR:-${WORKDIR}}
+    # Garante que está no diretório de build
+    cd "${BUILDDIR:-$WORK}" || die "Build directory não encontrado"
 
-  # Garante BINARIES como array se não existir
-  if ! declare -p BINARIES >/dev/null 2>&1; then
-    declare -a BINARIES=()
-  fi
-
-  if [[ ${#BINARIES[@]} -gt 0 ]]; then
-    for b in "${BINARIES[@]}"; do
-      local rel="${b#/}" ; mkdir -p "${PKGDEST}/$(dirname "${rel}")"
-      cp -av "${WORKDIR}/$(basename "${b}")" "${PKGDEST}/${rel}"
-    done
-  else
-    pushd "${dir}" >/dev/null || die "Diretório de build inválido"
-    if [[ ${DESTDIR_INSTALL} == yes ]]; then
-      spinner_run "make install (DESTDIR)" make DESTDIR="${PKGDEST}" install "${INSTALL_OPTS[@]:-}"
+    if [[ ${DESTDIR_INSTALL:-no} == yes ]]; then
+        preinstall_snapshot
+        spinner_run "make install (DESTDIR)" \
+            make install DESTDIR="${ROOTFS}" "${INSTALL_OPTS[@]:-}"
+        postinstall_snapshot
+        manifest_from_snapshots
     else
-      preinstall_snapshot() {
-    mkdir -p "${WORK}"
-    find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst" || touch "${WORK}/.preinstall.lst"
+        preinstall_snapshot
+        spinner_run "make install (direto)" \
+            make install "${INSTALL_OPTS[@]:-}"
+        postinstall_snapshot
+        manifest_from_snapshots
+    fi
+
+    # Volta pro diretório raiz do projeto
+    cd "$TOPDIR" || true
 }
     fi
     popd >/dev/null || true
