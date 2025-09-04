@@ -240,11 +240,11 @@ configure_step() {
     local dir="${BUILDDIR:-${WORKDIR}}"
 
     # garante que o diretório exista
-    [[ -d "$dir" ]] || mkdir -p "$dir"
+    mkdir -p "$dir"
 
     pushd "$dir" >/dev/null || die "Falha ao entrar em $dir"
 
-    # hooks pré-configure
+    # hook pré-configure
     run_hook pre_configure
 
     if [[ -x "${RECIPE_DIR}/hooks/configure" ]]; then
@@ -252,22 +252,18 @@ configure_step() {
     else
         case "${BUILD_SYSTEM}" in
             autotools)
-                mkdir -p "$BUILDDIR"
-                pushd "$BUILDDIR" >/dev/null || die "Falha em BUILDDIR"
-                spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
-                popd >/dev/null
+                # executa configure a partir do diretório build
+                if [[ -x ../configure ]]; then
+                    spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
+                else
+                    die "Arquivo configure não encontrado em $(dirname "$dir")"
+                fi
                 ;;
             cmake)
-                mkdir -p "$BUILDDIR"
-                pushd "$BUILDDIR" >/dev/null || die "Falha em BUILDDIR"
                 spinner_run "cmake" -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "${CONFIG_OPTS[@]:-}"
-                popd >/dev/null
                 ;;
             meson)
-                mkdir -p "$BUILDDIR"
-                pushd "$BUILDDIR" >/dev/null || die "Falha em BUILDDIR"
                 spinner_run "meson setup" meson setup . .. --prefix=/usr "${CONFIG_OPTS[@]:-}"
-                popd >/dev/null
                 ;;
             make)
                 info "BUILD_SYSTEM=make (sem configure)"
