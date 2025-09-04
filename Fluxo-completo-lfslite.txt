@@ -1,0 +1,178 @@
+==============================
+FLUXO COMPLETO LFS COM LFSLITE
+==============================
+
+# 1️⃣ Preparação inicial
+1. Torne o script executável:
+chmod +x lfslite1.0.sh
+
+2. Configure variáveis de ambiente opcionais:
+export ROOTFS=/opt/lfslite/root
+export WORK=./work
+export BUILD=./build
+export DIST=./dist
+export DB=./var/lfslite/db
+export LOGS=./var/lfslite/logs
+export JOBS=$(nproc)
+
+3. Crie a estrutura de diretórios e verifique dependências:
+./lfslite1.0.sh init
+
+# 2️⃣ Inicializar toolchain
+1. Inicialize o toolchain básico:
+./lfslite1.0.sh toolchain init
+
+2. Ative o toolchain no shell atual:
+source ./.toolchain.env
+
+# 3️⃣ Construir pacotes base (Passo 1)
+Exemplo: Binutils Pass 1
+
+1. Crie ou use a receita:
+recipes/base/binutils-pass1.recipe
+
+2. Build e instalação:
+./lfslite1.0.sh install recipes/base/binutils-pass1.recipe
+
+3. Verificar instalação:
+ls $ROOTFS/usr/bin | grep x86_64-lfs
+
+Exemplo: x86_64-lfs-addr2line, x86_64-lfs-as, etc.
+
+# GCC Pass 1
+1. Receita:
+recipes/base/gcc-pass1.recipe
+
+2. Build e instalação:
+./lfslite1.0.sh install recipes/base/gcc-pass1.recipe
+
+3. Binários prefixados:
+$ROOTFS/usr/bin/x86_64-lfs-gcc, x86_64-lfs-g++, etc.
+
+# 4️⃣ Pacotes base adicionais
+Exemplos:
+./lfslite1.0.sh install recipes/base/make.recipe
+./lfslite1.0.sh install recipes/base/coreutils.recipe
+./lfslite1.0.sh install recipes/base/xz.recipe
+... (continue com todos os pacotes do LFS base)
+
+# 5️⃣ X11
+Exemplo de pacotes X11:
+./lfslite1.0.sh install recipes/x11/xorg-server.recipe
+./lfslite1.0.sh install recipes/x11/libX11.recipe
+./lfslite1.0.sh install recipes/x11/xorg-apps.recipe
+
+# 6️⃣ Desktop
+Exemplo de pacotes de desktop:
+./lfslite1.0.sh install recipes/desktop/xfce.recipe
+./lfslite1.0.sh install recipes/desktop/lxappearance.recipe
+./lfslite1.0.sh install recipes/desktop/gtk-theme.recipe
+
+# 7️⃣ Dicas importantes
+- Sempre use bash para rodar o script:
+bash ./lfslite1.0.sh <comando>
+
+- O script cuida de:
+  * fetch → extrair → patch → configure → build → install
+  * snapshots pré e pós instalação
+  * manifests e logs
+
+- Para limpar WORK e BUILD:
+./lfslite1.0.sh clean
+
+- Para criar novas receitas:
+./lfslite1.0.sh new <nome> [categoria]
+
+- Todas as instalações vão para $ROOTFS, sem precisar de chroot.
+
+# 8️⃣ Ativar ambiente LFS
+1. Adicione ROOTFS binários ao PATH (opcional):
+export PATH=$ROOTFS/usr/bin:$PATH
+
+2. Teste os binários do toolchain:
+x86_64-lfs-gcc --version
+x86_64-lfs-as --version
+x86_64-lfs-ld --version
+
+==============================
+FIM DO FLUXO
+==============================
+
+==============================
+FLUXO COMPLETO LFS COM LFSLITE
+==============================
+
+# 1️⃣ Preparação inicial
+chmod +x lfslite1.0.sh
+
+export ROOTFS=/opt/lfslite/root
+export WORK=./work
+export BUILD=./build
+export DIST=./dist
+export DB=./var/lfslite/db
+export LOGS=./var/lfslite/logs
+export JOBS=$(nproc)
+
+./lfslite1.0.sh init
+source ./.toolchain.env
+
+# 2️⃣ Toolchain Pass 1
+./lfslite1.0.sh install recipes/base/binutils-pass1.recipe
+./lfslite1.0.sh install recipes/base/gcc-pass1.recipe
+
+# 3️⃣ Base LFS completo
+./lfslite1.0.sh install recipes/base/make.recipe
+./lfslite1.0.sh install recipes/base/patch.recipe
+./lfslite1.0.sh install recipes/base/xz.recipe
+./lfslite1.0.sh install recipes/base/bzip2.recipe
+./lfslite1.0.sh install recipes/base/gzip.recipe
+./lfslite1.0.sh install recipes/base/coreutils.recipe
+./lfslite1.0.sh install recipes/base/diffutils.recipe
+./lfslite1.0.sh install recipes/base/file.recipe
+./lfslite1.0.sh install recipes/base/findutils.recipe
+./lfslite1.0.sh install recipes/base/texinfo.recipe
+./lfslite1.0.sh install recipes/base/grep.recipe
+./lfslite1.0.sh install recipes/base/gawk.recipe
+./lfslite1.0.sh install recipes/base/sed.recipe
+./lfslite1.0.sh install recipes/base/bash.recipe
+./lfslite1.0.sh install recipes/base/libtool.recipe
+./lfslite1.0.sh install recipes/base/gmp.recipe
+./lfslite1.0.sh install recipes/base/mpfr.recipe
+./lfslite1.0.sh install recipes/base/mpc.recipe
+./lfslite1.0.sh install recipes/base/isl.recipe
+./lfslite1.0.sh install recipes/base/binutils-pass2.recipe
+./lfslite1.0.sh install recipes/base/gcc-pass2.recipe
+
+# 4️⃣ X11 Packages (exemplos)
+./lfslite1.0.sh install recipes/x11/xorg-server.recipe
+./lfslite1.0.sh install recipes/x11/libX11.recipe
+./lfslite1.0.sh install recipes/x11/libXext.recipe
+./lfslite1.0.sh install recipes/x11/libXrender.recipe
+./lfslite1.0.sh install recipes/x11/libXrandr.recipe
+./lfslite1.0.sh install recipes/x11/xorg-apps.recipe
+
+# 5️⃣ Desktop Environment (exemplos)
+./lfslite1.0.sh install recipes/desktop/xfce.recipe
+./lfslite1.0.sh install recipes/desktop/lxappearance.recipe
+./lfslite1.0.sh install recipes/desktop/gtk-theme.recipe
+
+# 6️⃣ Verificação
+ls $ROOTFS/usr/bin | grep x86_64-lfs
+x86_64-lfs-gcc --version
+x86_64-lfs-ld --version
+
+# 7️⃣ Limpeza de work/build (opcional)
+./lfslite1.0.sh clean
+
+# 8️⃣ Observações
+- Sempre rode com bash:
+bash ./lfslite1.0.sh <comando>
+- Todas as instalações vão para $ROOTFS sem precisar de chroot.
+- Snapshots e manifests são gerados automaticamente.
+- Hooks pré e pós-configure/install continuam funcionando.
+- Para criar novas receitas:
+./lfslite1.0.sh new <nome> [categoria]
+
+==============================
+FIM DO FLUXO COMPLETO
+==============================
