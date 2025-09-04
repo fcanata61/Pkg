@@ -251,15 +251,21 @@ configure_step() {
 }
 
 compile_step() {
-  local dir=${BUILDDIR:-${WORKDIR}}
-  pushd "${dir}" >/dev/null || die "Diretório de build inválido"
-  case "${BUILD_SYSTEM}" in
-    autotools|cmake|meson|make)
-      spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}" "${MAKE_OPTS[@]:-}"
-      ;;
-    *) die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}" ;;
-  esac
-  popd >/dev/null || true
+    local dir=${BUILDDIR:-${WORKDIR}}
+    pushd "${dir}" >/dev/null || die "Diretório de build inválido"
+
+    case "${BUILD_SYSTEM}" in
+        autotools|cmake|meson|make)
+            if [[ ${#MAKE_OPTS[@]} -gt 0 ]]; then
+                spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}" "${MAKE_OPTS[@]}"
+            else
+                spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}"
+            fi
+            ;;
+        *) die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}" ;;
+    esac
+
+    popd >/dev/null || true
 }
 
 ############################################
