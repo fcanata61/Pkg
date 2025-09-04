@@ -1,0 +1,28 @@
+# Binutils Passo 1 — LFS 12.2
+NAME="binutils"
+VERSION="2.45"
+URL="https://ftp.gnu.org/gnu/binutils/binutils-2.45.tar.xz"
+SHA256="a7c9737de0b70e2c9ed7a1b32b8b8a3f1c30814465f748ec0229f43d5f1f3f42"
+
+PATCHES=( )
+BUILD_SYSTEM=autotools
+DESTDIR_INSTALL=no  # Passo 1 instala direto no toolchain
+
+# Variáveis do toolchain temporário
+: "${LFS_TGT:=x86_64-lfs-linux-gnu}"
+: "${TOOLS:=/opt/lfslite/tools}"
+
+# Opções de configure para Passo 1 (out-of-tree)
+CONFIG_OPTS=(
+  --prefix="${TOOLS}"
+  --with-sysroot
+  --target="${LFS_TGT}"
+  --disable-nls
+  --enable-gprofng=no
+  --disable-werror
+)
+
+# Make e install
+MAKE_OPTS=( )
+INSTALL_OPTS=( )
+BINARIES=( )  # não necessário copiar binários manualmente
