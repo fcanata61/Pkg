@@ -276,56 +276,38 @@ postinstall_snapshot() { find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sor
 manifest_from_snapshots() { comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"; }
 
 install_step() {
-    # Garante que está no diretório de build
-    cd "${BUILDDIR:-$WORK}" || die "Build directory não encontrado"
+  local build_dir="${BUILDDIR:-${WORK}}"
 
-    if [[ ${DESTDIR_INSTALL:-no} == yes ]]; then
-        preinstall_snapshot
-        spinner_run "make install (DESTDIR)" \
-            make install DESTDIR="${ROOTFS}" "${INSTALL_OPTS[@]:-}"
-        postinstall_snapshot
-        manifest_from_snapshots
+  # garante que o build existe
+  [[ -d "$build_dir" ]] || die "Build directory não encontrado: ${build_dir}"
+
+  pushd "$build_dir" >/dev/null || die "Falha ao entrar em ${build_dir}"
+
+  if [[ "${DESTDIR_INSTALL:-no}" == "yes" ]]; then
+    preinstall_snapshot
+
+    if (( ${#INSTALL_OPTS[@]:-0} )); then
+      spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}" "${INSTALL_OPTS[@]}"
     else
-        preinstall_snapshot
-        spinner_run "make install (direto)" \
-            make install "${INSTALL_OPTS[@]:-}"
-        postinstall_snapshot
-        manifest_from_snapshots
+      spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}"
     fi
 
-    # Volta pro diretório raiz do projeto
-    cd "$TOPDIR" || true
-}
-    fi
-    popd >/dev/null || true
-  fi
-
-  if [[ ${DESTDIR_INSTALL} == yes ]]; then
-    mkdir -p "${ROOTFS}"
-    if [[ "$(choose_fakeroot)" -eq 1 ]]; then
-      spinner_run "fakeroot merge" fakeroot sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
-    else
-      spinner_run "merge arquivos" sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
-    fi
-    ( cd "${PKGDEST}" && find . -type f -o -type l -o -type d | sed 's#^.##' | sed 's#^#/#' ) > "$(manifest_path)"
-  fi
-
-  {
-    echo "NAME=${NAME}"
-    echo "VERSION=${VERSION}"
-    echo "DATE=$(_ts)"
-    echo "RECIPE=${RECIPE_FILE}"
-  } > "$(meta_path)"
-
-  run_hook install
-  run_hook post_install
-
-  if [[ -s $(manifest_path) ]]; then
-    local count; count=$(wc -l <"$(manifest_path)")
-    success "Instalado ${BOLD}${NAME}${RESET} ${DIM}($(manifest_path): ${count} arquivos)${RESET}"
+    postinstall_snapshot
+    manifest_from_snapshots
   else
-    success "Instalado ${BOLD}${NAME}${RESET}"
+    preinstall_snapshot
+
+    if (( ${#INSTALL_OPTS[@]:-0} )); then
+      spinner_run "make install (direto)" make install "${INSTALL_OPTS[@]}"
+    else
+      spinner_run "make install (direto)" make install
+    fi
+
+    postinstall_snapshot
+    manifest_from_snapshots
   fi
+
+  popd >/dev/null || true
 }
 
 remove_pkg() {
