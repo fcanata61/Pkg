@@ -304,31 +304,27 @@ manifest_from_snapshots() { comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postins
 install_step() {
     local build_dir="${BUILDDIR:-$WORKDIR}"
 
-    [[ -d "$build_dir" ]] || die "Build directory não encontrado: ${build_dir}"
+    [ -d "$build_dir" ] || die "Build directory não encontrado: ${build_dir}"
 
     pushd "$build_dir" >/dev/null || die "Falha ao entrar em ${build_dir}"
 
     mkdir -p "${WORK}"
 
-    # snapshots pré-instalação
+    # pré-instalação snapshot
     find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
 
-    # Instalação
+    # monta opções de install
+    INSTALL_CMD="make install"
+    [ -n "${INSTALL_OPTS:-}" ] && INSTALL_CMD="$INSTALL_CMD $INSTALL_OPTS"
+
     if [[ ${DESTDIR_INSTALL:-no} == "yes" ]]; then
-        if (( ${#INSTALL_OPTS[@]:-0} )); then
-            spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}" "${INSTALL_OPTS[@]}"
-        else
-            spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}"
-        fi
-    else
-        if (( ${#INSTALL_OPTS[@]:-0} )); then
-            spinner_run "make install (direto)" make install "${INSTALL_OPTS[@]}"
-        else
-            spinner_run "make install (direto)" make install
-        fi
+        INSTALL_CMD="make DESTDIR=${PKGDEST} install"
+        [ -n "${INSTALL_OPTS:-}" ] && INSTALL_CMD="$INSTALL_CMD $INSTALL_OPTS"
     fi
 
-    # snapshots pós-instalação
+    spinner_run "Instalando" sh -c "$INSTALL_CMD"
+
+    # pós-instalação snapshot
     find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"
 
     # gerar manifest
