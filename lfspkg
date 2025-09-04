@@ -239,7 +239,7 @@ run_hook() {
 configure_step() {
     local dir="${BUILDDIR:-${WORKDIR}}"
 
-    # garante que o diretório exista
+    # garante que o diretório de build exista
     mkdir -p "$dir"
 
     pushd "$dir" >/dev/null || die "Falha ao entrar em $dir"
@@ -252,12 +252,8 @@ configure_step() {
     else
         case "${BUILD_SYSTEM}" in
             autotools)
-                # executa configure a partir do diretório build
-                if [[ -x ../configure ]]; then
-                    spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
-                else
-                    die "Arquivo configure não encontrado em $(dirname "$dir")"
-                fi
+                [[ -x ../configure ]] || die "Arquivo configure não encontrado em $(dirname "$dir")"
+                spinner_run "./configure" ../configure --prefix=/usr "${CONFIG_OPTS[@]:-}"
                 ;;
             cmake)
                 spinner_run "cmake" -S .. -B . -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release "${CONFIG_OPTS[@]:-}"
@@ -284,14 +280,13 @@ compile_step() {
 
     pushd "$dir" >/dev/null || die "Falha ao entrar em $dir"
 
-    case "${BUILD_SYSTEM}" in
-        autotools|cmake|meson|make)
-            spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}" "${MAKE_OPTS[@]:-}"
-            ;;
-        *)
-            die "BUILD_SYSTEM desconhecido: ${BUILD_SYSTEM}"
-            ;;
-    esac
+    [[ -f Makefile ]] || die "Makefile não encontrado em $dir. Rode configure primeiro."
+
+    if (( ${#MAKE_OPTS[@]:-0} )); then
+        spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}" "${MAKE_OPTS[@]}"
+    else
+        spinner_run "Compilando (${JOBS} jobs)" make -j"${JOBS}"
+    fi
 
     popd >/dev/null || true
 }
@@ -304,49 +299,37 @@ postinstall_snapshot() { find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sor
 manifest_from_snapshots() { comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"; }
 
 install_step() {
-    local build_dir="${BUILDDIR:-$WORK}"
+    local build_dir="${BUILDDIR:-$WORKDIR}"
 
-    # garante que o build existe
     [[ -d "$build_dir" ]] || die "Build directory não encontrado: ${build_dir}"
 
     pushd "$build_dir" >/dev/null || die "Falha ao entrar em ${build_dir}"
 
-    # garante que WORK exista antes de criar snapshots
     mkdir -p "${WORK}"
 
-    if [[ "${DESTDIR_INSTALL:-no}" == "yes" ]]; then
-        # snapshot antes da instalação
-        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
+    # snapshots pré-instalação
+    find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
 
-        # make install com DESTDIR
+    # Instalação
+    if [[ ${DESTDIR_INSTALL:-no} == "yes" ]]; then
         if (( ${#INSTALL_OPTS[@]:-0} )); then
             spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}" "${INSTALL_OPTS[@]}"
         else
             spinner_run "make install (DESTDIR)" make install DESTDIR="${ROOTFS}"
         fi
-
-        # snapshot após a instalação
-        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"
-
-        # gerar manifest
-        comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"
     else
-        # snapshot antes da instalação
-        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
-
-        # make install direto
         if (( ${#INSTALL_OPTS[@]:-0} )); then
             spinner_run "make install (direto)" make install "${INSTALL_OPTS[@]}"
         else
             spinner_run "make install (direto)" make install
         fi
-
-        # snapshot após a instalação
-        find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"
-
-        # gerar manifest
-        comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"
     fi
+
+    # snapshots pós-instalação
+    find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"
+
+    # gerar manifest
+    comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"
 
     popd >/dev/null || true
 }
