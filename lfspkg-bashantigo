@@ -303,34 +303,63 @@ manifest_from_snapshots() { comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postins
 
 install_step() {
     local build_dir="${BUILDDIR:-$WORKDIR}"
+    [ -d "$build_dir" ] || die "Diretório de build inválido: ${build_dir}"
 
-    [ -d "$build_dir" ] || die "Build directory não encontrado: ${build_dir}"
-
+    # Entrar no diretório de build
     pushd "$build_dir" >/dev/null || die "Falha ao entrar em ${build_dir}"
 
-    mkdir -p "${WORK}"
+    # Garantir diretórios necessários
+    mkdir -p "$WORK" "$ROOTFS" "$(dirname "$(manifest_path)")" "$(dirname "$(meta_path)")" "$PKGDEST"
 
-    # pré-instalação snapshot
+    # Pré-instalação snapshot
     find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.preinstall.lst"
 
-    # monta opções de install
+    # Construir comando de instalação
     INSTALL_CMD="make install"
+    if [ "${DESTDIR_INSTALL:-no}" = "yes" ]; then
+        INSTALL_CMD="make DESTDIR=${PKGDEST} install"
+    fi
+    # Adicionar opções se existirem
     [ -n "${INSTALL_OPTS:-}" ] && INSTALL_CMD="$INSTALL_CMD $INSTALL_OPTS"
 
-    if [[ ${DESTDIR_INSTALL:-no} == "yes" ]]; then
-        INSTALL_CMD="make DESTDIR=${PKGDEST} install"
-        [ -n "${INSTALL_OPTS:-}" ] && INSTALL_CMD="$INSTALL_CMD $INSTALL_OPTS"
-    fi
-
+    # Executar instalação com spinner
     spinner_run "Instalando" sh -c "$INSTALL_CMD"
 
-    # pós-instalação snapshot
+    # Se usamos DESTDIR, promover para ROOTFS
+    if [ "${DESTDIR_INSTALL:-no}" = "yes" ]; then
+        local use_fr
+        use_fr=$(choose_fakeroot)
+        if [ "$use_fr" -eq 1 ]; then
+            spinner_run "Fakeroot merge" fakeroot sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
+        else
+            spinner_run "Merge arquivos" sh -c "cp -a '${PKGDEST}'/* '${ROOTFS}'/"
+        fi
+    fi
+
+    # Pós-instalação snapshot
     find "${ROOTFS}" -xdev -printf '%p\n' 2>/dev/null | sort > "${WORK}/.postinstall.lst"
 
-    # gerar manifest
+    # Gerar manifest
     comm -13 "${WORK}/.preinstall.lst" "${WORK}/.postinstall.lst" > "$(manifest_path)"
 
+    # Gerar meta
+    {
+        echo "NAME=${NAME}"
+        echo "VERSION=${VERSION}"
+        echo "DATE=$(_ts)"
+        echo "RECIPE=${RECIPE_FILE}"
+    } > "$(meta_path)"
+
     popd >/dev/null || true
+
+    # Mensagem de sucesso
+    if [ -s "$(manifest_path)" ]; then
+        local count
+        count=$(wc -l <"$(manifest_path)")
+        success "Instalado ${BOLD}${NAME}${RESET} ${DIM}($(manifest_path): ${count} arquivos)${RESET}"
+    else
+        success "Instalado ${BOLD}${NAME}${RESET}"
+    fi
 }
 
 remove_pkg() {
